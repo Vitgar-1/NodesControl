@@ -10,7 +10,7 @@ return new class extends Migration
     {
         Schema::create('session_archive', function (Blueprint $table) {
             $table->string('session_id', 255)->primary();
-            $table->unsignedInteger('clicks')->default(0);
+            $table->integer('clicks')->default(0);
             $table->timestamp('archived_at')->nullable();
         });
     }

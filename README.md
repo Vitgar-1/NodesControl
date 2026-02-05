@@ -1,59 +1,228 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# NodesControl — Балансировщик запросов со Sticky Sessions
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Решение тестового задания — балансировщик HTTP-запросов, распределяющий пользовательские сессии между нодами.
+Реализован только балансировщик — ноды считаются уже готовыми.
 
-## About Laravel
+## Стек
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- PHP 8.2+ / Laravel 12
+- PostgreSQL — архив сессий
+- Redis — хранение маппинга сессий и списка нод ("в памяти балансировщика")
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Установка
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+```bash
+git clone <repo-url>
+cd NodesControl
+composer install
+cp .env.example .env
+php artisan key:generate
+```
 
-## Learning Laravel
+Настроить подключения в `.env`:
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+```env
+DB_CONNECTION=pgsql
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=nodes_control
+DB_USERNAME=app
+DB_PASSWORD=secret
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+```
 
-## Laravel Sponsors
+Применить миграции:
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+```bash
+php artisan migrate
+```
 
-### Premium Partners
+Запустить:
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+```bash
+php artisan serve
+```
 
-## Contributing
+## API
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+### Обработка нажатия
 
-## Code of Conduct
+```
+POST /api/press
+Content-Type: application/json
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+{
+    "session_id": "user123"
+}
 
-## Security Vulnerabilities
+→ {"message": "You clicked 5 times"}
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Пользователь в рамках сессии всегда попадает на одну ноду (sticky session).
+Новые сессии создаются на ноде с минимальным количеством активных сессий.
 
-## License
+### Управление нодами
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```
+POST /api/node
+Content-Type: application/json
+
+{
+    "action": "add",
+    "address": "http://node1:8080"
+}
+
+→ {"message": "OK"}
+```
+
+| action   | Поведение                                                         |
+|----------|-------------------------------------------------------------------|
+| `add`    | Добавляет ноду в кластер с 0 активных сессий                      |
+| `remove` | Вызывает `/clean` с archive=true на ноде, удаляет из кластера     |
+
+## Архитектура
+
+```
+Запрос → FormRequest (валидация) → DTO → Service (бизнес-логика) → Repository (БД)
+```
+
+### Структура
+
+```
+app/
+├── Console/Commands/       Artisan-команды (очистка сессий)
+├── DTO/                    Data Transfer Objects
+├── Http/
+│   ├── Controllers/        Тонкие контроллеры
+│   └── Requests/           FormRequest валидация
+├── Models/                 Eloquent модели
+├── Repositories/           Работа с PostgreSQL
+└── Services/               Бизнес-логика балансировки
+```
+
+### Хранение данных
+
+| Хранилище    | Данные                              | Формат                                 |
+|-------------|--------------------------------------|----------------------------------------|
+| Redis (hash)| Список нод + счётчики сессий         | `balancer:nodes → {url: count}`        |
+| Redis (str) | Привязка сессии к ноде (TTL 10 мин)  | `balancer:session:{id} → url`          |
+| PostgreSQL  | Архив истёкших сессий                | Таблица `session_archive`              |
+
+### Обработка сбоев
+
+- При недоступности ноды — исключение из кластера, данные считаются утерянными
+- Запрос перенаправляется на другую ноду
+- При удалении ноды — сначала архивация через `/clean`, затем удаление
+
+### Очистка сессий
+
+Команда `php artisan sessions:clean-expired` запускается по расписанию каждую минуту.
+Находит сессии с TTL < 60 секунд, вызывает `/clean` на нодах для архивации, удаляет маппинги из Redis.
+
+---
+
+## Тестовое задание
+
+<details>
+<summary>Полный текст задания</summary>
+
+### Балансировщик запросов с sticky sessions
+
+Пусть есть некоторый API некого сервиса. Обращение пользователя к данному сервису подразумевает отправку HTTP-запроса, его обработку, и ответ на него.
+Для простоты понимания сервис будет отслеживать количество нажатий пользователя на кнопку. Приведем реализацию echo server'а, принимающего пользовательский "клик" и возвращающего количество нажатий на кнопку:
+
+```php
+class EchoServer
+{
+    private $sessionHandler;
+    private $databaseHandler;
+    ...
+
+    function pressBtn($session_id)
+    {
+        $session = $this->sessionHandler.read($session_id);
+        if (empty($session) || empty($session['clicks'])) {
+            $session = ['clicks' => 0];
+        }
+
+        $clicks = $session['clicks'] + 1;
+        $session.set('clicks', $clicks);
+        $this->sessionHandler.write($session_id, $session);
+
+        sendAnswer("You clicked the button $clicks times");
+    }
+
+    function clean($archive)
+    {
+        foreach ($this->sessionHandler as $session_id => $session) {
+            $this->databaseHandler.setClicks($session_id, $session['clicks']);
+            $this->sessionHandler.delete($session_id);
+        }
+    }
+}
+```
+
+Наша кнопка стала настолько востребована, что понадобилось распределить нагрузку на несколько машин (нод). Для этого было решено организовать балансировщик запросов.
+Так нода - это просто HTTP-сервер с API, который обрабатывает нажатия. Кластер - совокупность всех активных нод. Балансировщик - это PHP скрипт, который принимает запросы от пользователей и перенаправляет их на ноды.
+
+**Цель:** Создать простой балансировщик, который распределяет пользовательские сессии между нодами.
+
+**Требования:**
+
+1. Основная логика:
+   - Пользователь в рамках сессии (session_id не меняется) всегда попадает на одну ноду;
+   - Новые сессии создаются на ноде с минимальным количеством активных сессий;
+   - Привязка сессий к нодам хранится в памяти балансировщика;
+   - Данные сессии (количество кликов) хранятся на ноде;
+   - Сессия пользователя не превышает 10 минут. Далее сессия удаляется, данные переносятся в общий архив (PostgreSQL). Далее может быть создана новая сессия на другой ноде на основе архивных данных;
+   - Список нод изначально пуст. Администратор может добавить / удалить ноду в процессе работы;
+   - При недоступности ноды балансировщик должен исключить её из кластера и создать новые сессии на других нодах с восстановлением данных из архива.
+
+2. API балансировщика:
+   ```
+   POST /press        {"session_id": "user123"}         → "You clicked 5 times"
+   POST /node         {"action": "add|remove", "address": "http://node1:8080"}
+   ```
+
+3. API ноды (предполагается, что нода уже реализована):
+   ```
+   POST /press        {"session_id": "user123"}         → "You clicked 5 times"
+   POST /clean        {"archive": true|false}           → "OK"
+   ```
+
+4. Структура данных архива (PostgreSQL):
+   ```sql
+   CREATE TABLE session_archive (
+       session_id VARCHAR(255) PRIMARY KEY,
+       clicks INT DEFAULT 0,
+       archived_at TIMESTAMP
+   );
+   ```
+
+**Что не нужно делать:**
+- Реализовывать ноду. Достаточно приведенного шаблона;
+- Перемещение активных сессий между нодами;
+- Сложную проверку доступности нод. Достаточно try-catch при запросе;
+- Веб-интерфейс управления;
+- Балансировку по CPU/RAM и другим метрикам.
+
+**Критерии оценки:**
+1. Работает sticky sessions;
+2. Новые сессии распределяются равномерно;
+3. Архив корректно используется;
+4. Чистый, понятный код.
+
+
+**Примечания:**
+1. Считать архивацию на стороне ноды корректной;
+2. При удалении ноды балансировщик должен вызвать /clean с archive=true для архивации данных;
+3. При недоступности ноды данные считаются утерянными Создаются новые сессии на других нодах с данными из архива (если есть архивные данные).
+
+**Рекомендуемые технологии:**
+1. PHP 7.4+
+2. PostgreSQL для архива
+3. Любой микрофреймворк для реализации API (Slim, Lumen) или чистый PHP
+
+</details>
